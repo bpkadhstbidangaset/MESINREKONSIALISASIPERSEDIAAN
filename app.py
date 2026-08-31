@@ -39,7 +39,6 @@ if file_rak and file_lra and file_app:
             # 1. BACA MASTER RAK PERSEDIAAN
             # ----------------------------------------------------
             df_rak = pd.read_excel(file_rak, skiprows=1)
-            # Cari kolom yang berisi kode akun persediaan (biasanya diawali 5.)
             col_kode_rak = df_rak.columns[0]
             for col in df_rak.columns:
                 sample = df_rak[col].dropna().astype(str).str.strip()
@@ -68,13 +67,12 @@ if file_rak and file_lra and file_app:
                     df_excl.iloc[:, 1].dropna().astype(str).str.lower().tolist()
                 )
 
-            # Pilih sheet LRA (prioritas nama "01" atau sheet pertama)
             sheet_lra_name = (
                 "01" if "01" in xls_lra.sheet_names else xls_lra.sheet_names[0]
             )
             raw_lra = pd.read_excel(file_lra, sheet_name=sheet_lra_name)
 
-            # Deteksi baris header LRA secara fleksibel
+            # Deteksi baris header LRA
             header_idx = None
             for idx, row in raw_lra.iterrows():
                 row_str = " ".join(row.dropna().astype(str).str.lower())
@@ -90,7 +88,6 @@ if file_rak and file_lra and file_app:
                 str(col).strip() for col in raw_lra.iloc[header_idx].values
             ]
 
-            # Normalisasi & deteksi nama kolom LRA
             col_skpd = None
             col_kode = None
             col_nama_rek = None
@@ -119,7 +116,6 @@ if file_rak and file_lra and file_app:
                 ):
                     col_realisasi = col
 
-            # Fallback jika kolom tidak terdeteksi via nama
             if not col_kode:
                 col_kode = df_lra.columns[0]
             if not col_nama_rek:
@@ -131,10 +127,9 @@ if file_rak and file_lra and file_app:
             if not col_realisasi:
                 col_realisasi = df_lra.columns[-1]
 
-            # Bersihkan Kode Rekening
             df_lra["Kode_Clean"] = df_lra[col_kode].astype(str).str.strip()
 
-            # Filter data LRA berdasarkan master RAK (jika cocok, gunakan rak_codes; jika tidak, ambil akun 5.)
+            # Filter data akun persediaan
             df_lra_persediaan = df_lra[
                 df_lra["Kode_Clean"].isin(rak_codes)
             ].copy()
@@ -143,7 +138,6 @@ if file_rak and file_lra and file_app:
                     df_lra["Kode_Clean"].str.startswith("5.")
                 ].copy()
 
-            # Filter pengecualian keyword jika ada
             if excl_keywords:
                 for kw in excl_keywords:
                     df_lra_persediaan = df_lra_persediaan[
@@ -153,7 +147,6 @@ if file_rak and file_lra and file_app:
                         .str.contains(kw)
                     ]
 
-            # Bersihkan nilai realisasi
             df_lra_persediaan["Nilai_Clean"] = (
                 df_lra_persediaan[col_realisasi]
                 .astype(str)
@@ -228,7 +221,6 @@ if file_rak and file_lra and file_app:
         st.sidebar.markdown("---")
         st.sidebar.subheader("⚙️ Filter Rekonsiliasi")
 
-        # Cek apakah ada kolom SKPD
         if col_skpd and col_skpd in df_lra_persediaan.columns:
             list_skpd = sorted(
                 df_lra_persediaan[col_skpd].dropna().unique().tolist()
@@ -456,7 +448,7 @@ if file_rak and file_lra and file_app:
 
         st.download_button(
             label="📥 Download Laporan Rekonsiliasi (.xlsx)",
-            data=buffer.getvalue>,
+            data=buffer.getvalue(),
             file_name=f"Rekon_{str(skpd_pilihan).replace(' ', '_')}_{periode_label.replace(' ', '_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
