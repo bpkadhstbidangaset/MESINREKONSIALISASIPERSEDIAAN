@@ -49,7 +49,8 @@ if file_rak and file_lra and file_app:
             rak_codes = set(
                 df_rak[col_kode_rak].dropna().astype(str).str.strip()
             )
-            rak_codes = {c for c in rak_codes if c.startswith("5.")}
+            # Ambil hanya kode rekening persediaan level rincian objek (5.1.02...)
+            rak_codes = {c for c in rak_codes if c.startswith("5.1.02")}
 
             # ----------------------------------------------------
             # 2. BACA DATA LRA / SIPD
@@ -72,7 +73,6 @@ if file_rak and file_lra and file_app:
             )
             raw_lra = pd.read_excel(file_lra, sheet_name=sheet_lra_name)
 
-            # Deteksi baris header LRA
             header_idx = None
             for idx, row in raw_lra.iterrows():
                 row_str = " ".join(row.dropna().astype(str).str.lower())
@@ -129,13 +129,14 @@ if file_rak and file_lra and file_app:
 
             df_lra["Kode_Clean"] = df_lra[col_kode].astype(str).str.strip()
 
-            # Filter data akun persediaan
-            df_lra_persediaan = df_lra[
-                df_lra["Kode_Clean"].isin(rak_codes)
-            ].copy()
-            if df_lra_persediaan.empty:
+            # Filter data akun LRA hanya untuk kode persediaan yang valid
+            if len(rak_codes) > 0:
                 df_lra_persediaan = df_lra[
-                    df_lra["Kode_Clean"].str.startswith("5.")
+                    df_lra["Kode_Clean"].isin(rak_codes)
+                ].copy()
+            else:
+                df_lra_persediaan = df_lra[
+                    df_lra["Kode_Clean"].str.startswith("5.1.02")
                 ].copy()
 
             if excl_keywords:
@@ -202,6 +203,11 @@ if file_rak and file_lra and file_app:
             df_app["Kode_Rekening"] = (
                 df_app["Kode_Belanja"].astype(str).str.strip()
             )
+
+            # Ambil hanya akun belanja persediaan 5.1.02...
+            df_app = df_app[
+                df_app["Kode_Rekening"].str.startswith("5.1.02")
+            ].copy()
 
             df_app["Nilai_Persediaan_Clean"] = (
                 df_app["Nilai_Persediaan"]
@@ -324,6 +330,11 @@ if file_rak and file_lra and file_app:
             lra_summary, app_summary, on="Kode_Rekening", how="outer"
         ).fillna({"Total_LRA": 0, "Total_Persediaan": 0})
 
+        # Hapus baris yang nilai LRA & Persediaan keduanya Rp 0
+        recon = recon[
+            (recon["Total_LRA"] != 0) | (recon["Total_Persediaan"] != 0)
+        ].copy()
+
         recon["Nama_Rekening"] = (
             recon["Nama_Rekening_LRA"]
             .combine_first(recon["Nama_Rekening_App"])
@@ -379,43 +390,65 @@ if file_rak and file_lra and file_app:
             delta=f"{format_rupiah(tot_selisih)}",
             delta_color="inverse",
         )
-        jml_balance = (recon["Status"] == "✅ Cocok / Balance").sum()
-        col4.metric("Kesesuaian Akun", f"{jml_balance} / {len(recon)} Akun")
+        jml_selisih = (recon["Status"] != "✅ Cocok / Balance").sum()
+        col4.metric(
+            "Akun Bermasalah / Selisih",
+            f"{jml_selisih} / {len(recon)} Akun",
+            delta_color="inverse",
+        )
 
         st.markdown("---")
-        st.subheader("📋 Ringkasan Rekonsiliasi Per Kode Rekening")
+        st.subheader("⚠️ Daftar Rekening Persediaan yang Bermasalah (Selisih)")
 
-        filter_status = st.multiselect(
-            "Filter Status Tampilan:",
-            options=recon["Status"].unique().tolist(),
-            default=recon["Status"].unique().tolist(),
+        # Pilihan filter status (Default hanya menampilkan yang bermasalah)
+        semua_status = recon["Status"].unique().tolist()
+        status_bermasalah = [s for s in semua_status if "Cocok" not in s]
+
+        hanya_masalah = st.checkbox(
+            "Tampilkan HANYA rekening yang selisih / bermasalah", value=True
         )
-        recon_view = recon[recon["Status"].isin(filter_status)].copy()
+
+        if hanya_masalah:
+            recon_view = recon[recon["Status"] != "✅ Cocok / Balance"].copy()
+        else:
+            filter_status = st.multiselect(
+                "Filter Status Tampilan:",
+                options=semua_status,
+                default=semua_status,
+            )
+            recon_view = recon[recon["Status"].isin(filter_status)].copy()
 
         def style_status(row):
             if "Cocok" in row["Status"]:
                 return ["background-color: #d4edda; color: #155724;"] * len(row)
             return ["background-color: #f8d7da; color: #721c24;"] * len(row)
 
-        st.dataframe(
-            recon_view.style.apply(style_status, axis=1).format(
-                {
-                    "Total_LRA": format_rupiah,
-                    "Total_Persediaan": format_rupiah,
-                    "Selisih": format_rupiah,
-                }
-            ),
-            use_container_width=True,
-            height=350,
-        )
+        if recon_view.empty:
+            st.success(
+                "🎉 Luar biasa! Semua rekening persediaan sudah cocok dan balance."
+            )
+        else:
+            st.dataframe(
+                recon_view.style.apply(style_status, axis=1).format(
+                    {
+                        "Total_LRA": format_rupiah,
+                        "Total_Persediaan": format_rupiah,
+                        "Selisih": format_rupiah,
+                    }
+                ),
+                use_container_width=True,
+                height=350,
+            )
 
         # Rincian Transaksi
         with st.expander(
-            "🔍 Lihat Rincian Transaksi Aplikasi Persediaan (Per Akun)"
+            "🔍 Rincian Transaksi Aplikasi Persediaan untuk Akun Bermasalah"
         ):
             list_akun = recon_view["Kode_Rekening"].tolist()
             if list_akun:
-                akun_terpilih = st.selectbox("Pilih Kode Rekening:", list_akun)
+                akun_terpilih = st.selectbox(
+                    "Pilih Kode Rekening yang Ingin Ditelusuri:", list_akun
+                )
                 df_detail = df_app_filtered[
                     df_app_filtered["Kode_Rekening"] == akun_terpilih
                 ][
@@ -429,18 +462,21 @@ if file_rak and file_lra and file_app:
                     ]
                 ]
                 st.write(
-                    f"Daftar mutasi barang untuk akun **{akun_terpilih}**:"
+                    f"Daftar transaksi barang untuk akun **{akun_terpilih}**:"
                 )
                 st.dataframe(df_detail, use_container_width=True)
             else:
-                st.info("Tidak ada data akun pada filter yang dipilih.")
+                st.info("Tidak ada akun bermasalah pada filter yang aktif.")
 
         # Download Excel
         st.markdown("---")
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             recon.to_excel(
-                writer, sheet_name="Ringkasan Rekonsiliasi", index=False
+                writer, sheet_name="Ringkasan Semua Akun", index=False
+            )
+            recon[recon["Status"] != "✅ Cocok / Balance"].to_excel(
+                writer, sheet_name="Akun Bermasalah", index=False
             )
             df_app_filtered.to_excel(
                 writer, sheet_name="Detail Mutasi Persediaan", index=False
@@ -449,7 +485,7 @@ if file_rak and file_lra and file_app:
         st.download_button(
             label="📥 Download Laporan Rekonsiliasi (.xlsx)",
             data=buffer.getvalue(),
-            file_name=f"Rekon_{str(skpd_pilihan).replace(' ', '_')}_{periode_label.replace(' ', '_')}.xlsx",
+            file_name=f"Rekon_Masalah_{str(skpd_pilihan).replace(' ', '_')}_{periode_label.replace(' ', '_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
