@@ -12,7 +12,6 @@ st.title("📊 Aplikasi Rekonsiliasi Persediaan vs LRA (SIPD)")
 st.caption("Pemerintah Kabupaten Hulu Sungai Tengah")
 
 
-# Format Rupiah Standar Indonesia
 def format_rupiah(val):
     if pd.isna(val):
         return "Rp 0"
@@ -36,68 +35,140 @@ file_app = st.sidebar.file_uploader(
 if file_rak and file_lra and file_app:
     try:
         with st.spinner("Memproses dan membaca berkas Excel..."):
+            # ----------------------------------------------------
             # 1. BACA MASTER RAK PERSEDIAAN
+            # ----------------------------------------------------
             df_rak = pd.read_excel(file_rak, skiprows=1)
-            first_col_rak = df_rak.columns[0]
+            # Cari kolom yang berisi kode akun persediaan (biasanya diawali 5.)
+            col_kode_rak = df_rak.columns[0]
+            for col in df_rak.columns:
+                sample = df_rak[col].dropna().astype(str).str.strip()
+                if sample.str.startswith("5.").any():
+                    col_kode_rak = col
+                    break
+
             rak_codes = set(
-                df_rak[first_col_rak].dropna().astype(str).str.strip()
+                df_rak[col_kode_rak].dropna().astype(str).str.strip()
             )
             rak_codes = {c for c in rak_codes if c.startswith("5.")}
 
+            # ----------------------------------------------------
             # 2. BACA DATA LRA / SIPD
+            # ----------------------------------------------------
             xls_lra = pd.ExcelFile(file_lra)
             excl_keywords = []
-            if "persediaan" in [s.lower() for s in xls_lra.sheet_names]:
-                sheet_excl_name = [
-                    s for s in xls_lra.sheet_names if s.lower() == "persediaan"
-                ][0]
-                df_excl = pd.read_excel(file_lra, sheet_name=sheet_excl_name)
+            sheet_names_lower = [s.lower() for s in xls_lra.sheet_names]
+
+            if "persediaan" in sheet_names_lower:
+                idx_excl = sheet_names_lower.index("persediaan")
+                df_excl = pd.read_excel(
+                    file_lra, sheet_name=xls_lra.sheet_names[idx_excl]
+                )
                 excl_keywords = (
                     df_excl.iloc[:, 1].dropna().astype(str).str.lower().tolist()
                 )
 
+            # Pilih sheet LRA (prioritas nama "01" atau sheet pertama)
             sheet_lra_name = (
                 "01" if "01" in xls_lra.sheet_names else xls_lra.sheet_names[0]
             )
             raw_lra = pd.read_excel(file_lra, sheet_name=sheet_lra_name)
 
-            header_idx = 3
+            # Deteksi baris header LRA secara fleksibel
+            header_idx = None
             for idx, row in raw_lra.iterrows():
-                if any(
-                    row.astype(str).str.contains(
-                        "Kode Rekening", case=False, na=False
-                    )
-                ):
+                row_str = " ".join(row.dropna().astype(str).str.lower())
+                if "kode rekening" in row_str or "kode akun" in row_str:
                     header_idx = idx
                     break
+
+            if header_idx is None:
+                header_idx = 0
 
             df_lra = raw_lra.iloc[header_idx + 1 :].copy()
             df_lra.columns = [
                 str(col).strip() for col in raw_lra.iloc[header_idx].values
             ]
-            df_lra["Kode_Clean"] = (
-                df_lra["Kode Rekening"].astype(str).str.strip()
-            )
 
-            # Filter akun persediaan dari RAK
+            # Normalisasi & deteksi nama kolom LRA
+            col_skpd = None
+            col_kode = None
+            col_nama_rek = None
+            col_realisasi = None
+
+            for col in df_lra.columns:
+                c_low = col.lower()
+                if any(
+                    k in c_low
+                    for k in ["skpd", "unit kerja", "organisasi", "dinas"]
+                ):
+                    col_skpd = col
+                elif "kode" in c_low and (
+                    "rekening" in c_low or "akun" in c_low
+                ):
+                    col_kode = col
+                elif (
+                    "nama" in c_low
+                    and ("rekening" in c_low or "akun" in c_low)
+                    and "skpd" not in c_low
+                ):
+                    col_nama_rek = col
+                elif any(
+                    k in c_low
+                    for k in ["realisasi", "nilai realisasi", "jumlah"]
+                ):
+                    col_realisasi = col
+
+            # Fallback jika kolom tidak terdeteksi via nama
+            if not col_kode:
+                col_kode = df_lra.columns[0]
+            if not col_nama_rek:
+                col_nama_rek = (
+                    df_lra.columns[1]
+                    if len(df_lra.columns) > 1
+                    else df_lra.columns[0]
+                )
+            if not col_realisasi:
+                col_realisasi = df_lra.columns[-1]
+
+            # Bersihkan Kode Rekening
+            df_lra["Kode_Clean"] = df_lra[col_kode].astype(str).str.strip()
+
+            # Filter data LRA berdasarkan master RAK (jika cocok, gunakan rak_codes; jika tidak, ambil akun 5.)
             df_lra_persediaan = df_lra[
                 df_lra["Kode_Clean"].isin(rak_codes)
             ].copy()
+            if df_lra_persediaan.empty:
+                df_lra_persediaan = df_lra[
+                    df_lra["Kode_Clean"].str.startswith("5.")
+                ].copy()
 
-            # Filter pengecualian kata kunci
-            for kw in excl_keywords:
-                df_lra_persediaan = df_lra_persediaan[
-                    ~df_lra_persediaan["Nama Rekening"]
-                    .astype(str)
-                    .str.lower()
-                    .str.contains(kw)
-                ]
+            # Filter pengecualian keyword jika ada
+            if excl_keywords:
+                for kw in excl_keywords:
+                    df_lra_persediaan = df_lra_persediaan[
+                        ~df_lra_persediaan[col_nama_rek]
+                        .astype(str)
+                        .str.lower()
+                        .str.contains(kw)
+                    ]
 
-            df_lra_persediaan["Nilai Realisasi"] = pd.to_numeric(
-                df_lra_persediaan["Nilai Realisasi"], errors="coerce"
+            # Bersihkan nilai realisasi
+            df_lra_persediaan["Nilai_Clean"] = (
+                df_lra_persediaan[col_realisasi]
+                .astype(str)
+                .str.replace("Rp", "", regex=False)
+                .str.replace(" ", "", regex=False)
+                .str.replace(".", "", regex=False)
+                .str.replace(",", ".", regex=False)
+            )
+            df_lra_persediaan["Nilai_Clean"] = pd.to_numeric(
+                df_lra_persediaan["Nilai_Clean"], errors="coerce"
             ).fillna(0)
 
+            # ----------------------------------------------------
             # 3. BACA DATA APLIKASI PERSEDIAAN
+            # ----------------------------------------------------
             df_app = pd.read_excel(file_app, skiprows=9)
             cols = [
                 "No",
@@ -113,7 +184,6 @@ if file_rak and file_lra and file_app:
                 "Nilai_Persediaan",
             ]
 
-            # Hanya potong dan ambil 11 kolom pertama untuk mencegah error length mismatch
             df_app = df_app.iloc[:, : len(cols)].copy()
             df_app.columns = cols
 
@@ -136,26 +206,47 @@ if file_rak and file_lra and file_app:
                 df_app["Tanggal"], errors="coerce"
             )
             df_app["Bulan"] = df_app["Tanggal_Parsed"].dt.month
-            df_app["Bulan_Nama"] = df_app["Tanggal_Parsed"].dt.strftime("%B")
             df_app["Kode_Rekening"] = (
                 df_app["Kode_Belanja"].astype(str).str.strip()
             )
-            df_app["Nilai_Persediaan"] = pd.to_numeric(
-                df_app["Nilai_Persediaan"], errors="coerce"
+
+            df_app["Nilai_Persediaan_Clean"] = (
+                df_app["Nilai_Persediaan"]
+                .astype(str)
+                .str.replace("Rp", "", regex=False)
+                .str.replace(" ", "", regex=False)
+                .str.replace(".", "", regex=False)
+                .str.replace(",", ".", regex=False)
+            )
+            df_app["Nilai_Persediaan_Clean"] = pd.to_numeric(
+                df_app["Nilai_Persediaan_Clean"], errors="coerce"
             ).fillna(0)
 
-        # Sidebar Filter Rekonsiliasi
+        # ----------------------------------------------------
+        # SIDEBAR FILTER
+        # ----------------------------------------------------
         st.sidebar.markdown("---")
         st.sidebar.subheader("⚙️ Filter Rekonsiliasi")
 
-        list_skpd = sorted(
-            df_lra_persediaan["Nama SKPD"].dropna().unique().tolist()
-        )
-        if not list_skpd:
-            st.warning("Tidak ditemukan data SKPD di file LRA.")
-            st.stop()
+        # Cek apakah ada kolom SKPD
+        if col_skpd and col_skpd in df_lra_persediaan.columns:
+            list_skpd = sorted(
+                df_lra_persediaan[col_skpd].dropna().unique().tolist()
+            )
+        else:
+            list_skpd = ["Semua / Tunggal (File LRA 1 SKPD)"]
 
-        skpd_pilihan = st.sidebar.selectbox("Pilih SKPD:", list_skpd)
+        if list_skpd:
+            skpd_pilihan = st.sidebar.selectbox("Pilih SKPD:", list_skpd)
+            if col_skpd and skpd_pilihan != "Semua / Tunggal (File LRA 1 SKPD)":
+                df_lra_filtered = df_lra_persediaan[
+                    df_lra_persediaan[col_skpd] == skpd_pilihan
+                ].copy()
+            else:
+                df_lra_filtered = df_lra_persediaan.copy()
+        else:
+            df_lra_filtered = df_lra_persediaan.copy()
+            skpd_pilihan = "SKPD Terpilih"
 
         filter_mode = st.sidebar.radio(
             "Mode Periode Rekonsiliasi:",
@@ -163,7 +254,6 @@ if file_rak and file_lra and file_app:
         )
 
         df_app_filtered = df_app.copy()
-
         nama_bulan_id = {
             1: "Januari",
             2: "Februari",
@@ -210,34 +300,30 @@ if file_rak and file_lra and file_app:
                 ]
                 periode_label = f"{tgl_awal} s.d. {tgl_akhir}"
 
+        # ----------------------------------------------------
         # 4. AGREGASI & REKONSILIASI
-        df_lra_filtered = df_lra_persediaan[
-            df_lra_persediaan["Nama SKPD"] == skpd_pilihan
-        ].copy()
-
+        # ----------------------------------------------------
         lra_summary = (
-            df_lra_filtered.groupby(["Kode_Clean", "Nama Rekening"])[
-                "Nilai Realisasi"
-            ]
+            df_lra_filtered.groupby(["Kode_Clean", col_nama_rek])["Nilai_Clean"]
             .sum()
             .reset_index()
             .rename(
                 columns={
                     "Kode_Clean": "Kode_Rekening",
-                    "Nama Rekening": "Nama_Rekening_LRA",
-                    "Nilai Realisasi": "Total_LRA",
+                    col_nama_rek: "Nama_Rekening_LRA",
+                    "Nilai_Clean": "Total_LRA",
                 }
             )
         )
 
         app_summary = (
             df_app_filtered.groupby("Kode_Rekening")
-            .agg({"Nama_Belanja": "first", "Nilai_Persediaan": "sum"})
+            .agg({"Nama_Belanja": "first", "Nilai_Persediaan_Clean": "sum"})
             .reset_index()
             .rename(
                 columns={
                     "Nama_Belanja": "Nama_Rekening_App",
-                    "Nilai_Persediaan": "Total_Persediaan",
+                    "Nilai_Persediaan_Clean": "Total_Persediaan",
                 }
             )
         )
@@ -282,7 +368,9 @@ if file_rak and file_lra and file_app:
             ]
         ].sort_values(by="Kode_Rekening")
 
-        # Dashboard Metrik
+        # ----------------------------------------------------
+        # DASHBOARD METRIK & TABEL
+        # ----------------------------------------------------
         st.subheader(f"🏢 {skpd_pilihan}")
         st.caption(f"Periode Rekonsiliasi: **{periode_label}**")
 
@@ -302,7 +390,6 @@ if file_rak and file_lra and file_app:
         jml_balance = (recon["Status"] == "✅ Cocok / Balance").sum()
         col4.metric("Kesesuaian Akun", f"{jml_balance} / {len(recon)} Akun")
 
-        # Tabel Rekonsiliasi
         st.markdown("---")
         st.subheader("📋 Ringkasan Rekonsiliasi Per Kode Rekening")
 
@@ -336,9 +423,7 @@ if file_rak and file_lra and file_app:
         ):
             list_akun = recon_view["Kode_Rekening"].tolist()
             if list_akun:
-                akun_terpilih = st.selectbox(
-                    "Pilih Kode Rekening:", list_akun
-                )
+                akun_terpilih = st.selectbox("Pilih Kode Rekening:", list_akun)
                 df_detail = df_app_filtered[
                     df_app_filtered["Kode_Rekening"] == akun_terpilih
                 ][
@@ -354,14 +439,11 @@ if file_rak and file_lra and file_app:
                 st.write(
                     f"Daftar mutasi barang untuk akun **{akun_terpilih}**:"
                 )
-                st.dataframe(
-                    df_detail.style.format({"Nilai_Persediaan": format_rupiah}),
-                    use_container_width=True,
-                )
+                st.dataframe(df_detail, use_container_width=True)
             else:
                 st.info("Tidak ada data akun pada filter yang dipilih.")
 
-        # Ekspor Excel Multi-Sheet
+        # Download Excel
         st.markdown("---")
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
@@ -374,8 +456,8 @@ if file_rak and file_lra and file_app:
 
         st.download_button(
             label="📥 Download Laporan Rekonsiliasi (.xlsx)",
-            data=buffer.getvalue(),
-            file_name=f"Rekon_{skpd_pilihan.replace(' ', '_')}_{periode_label.replace(' ', '_')}.xlsx",
+            data=buffer.getvalue>,
+            file_name=f"Rekon_{str(skpd_pilihan).replace(' ', '_')}_{periode_label.replace(' ', '_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
